@@ -2,6 +2,9 @@ class VAOMApp {
     constructor() {
         this.orders = [];
         this.isRecording = false;
+        this.isListeningForWakeWord = true;
+        this.commandBuffer = '';
+        this.silenceTimer = null;
         this.recognition = null;
         this.synthesis = window.speechSynthesis;
         this.apiBaseUrl = 'http://localhost:3001/api';
@@ -11,9 +14,15 @@ class VAOMApp {
         this.isWaitingForConfirmation = false;
         this.clarificationContext = null;
         this.pendingAction = null;
-        this.environment = 'Quiet'; // Could be 'High Noise' for kiosk mode
+        this.environment = 'Quiet';
         this.lastAction = '';
         this.totalTimeSaved = 0;
+        this.wakeWord = 'volt';
+        this.silenceDelay = 2000; // 2 seconds
+        this._isRestarting = false;  // guard against duplicate restarts
+        
+        // Fuzzy wake word matching - words that sound like "Volt"
+        this.fuzzyWakeWords = ['volt', 'bolt', 'old', 'vault', 'gold', 'bolt', 'vold', 'wolt'];
         
         this.initializeSpeechRecognition();
         this.bindEvents();
@@ -22,45 +31,225 @@ class VAOMApp {
         this.initializeAnalytics();
     }
 
+    // Check if transcript contains any fuzzy match for wake word
+    detectFuzzyWakeWord(transcript) {
+        const lowerTranscript = transcript.toLowerCase();
+        
+        // Check for exact or partial matches
+        for (const word of this.fuzzyWakeWords) {
+            if (lowerTranscript.includes(word)) {
+                return word; // Return the matched word
+            }
+        }
+        
+        // Check for phonetic similarity (words starting with 'v', 'b', 'g' + 'olt' sound)
+        const words = lowerTranscript.split(/\s+/);
+        for (const word of words) {
+            // Pattern: [vbg] + o + [l]* + [td] or similar
+            if (/^[vbg][oa][lvu]*[lt][td]?$/.test(word) && word.length >= 3) {
+                return word;
+            }
+        }
+        
+        return null;
+    }
+
+    // Strip wake word from command
+    stripWakeWord(transcript, detectedWord) {
+        if (!detectedWord) return transcript;
+        
+        // Remove the wake word and any common following punctuation/words
+        let cleaned = transcript.toLowerCase();
+        
+        // Remove the detected wake word
+        cleaned = cleaned.replace(detectedWord, '');
+        
+        // Remove common connecting words that follow wake words
+        cleaned = cleaned.replace(/^\s*,?\s*/, ''); // Leading comma/space
+        cleaned = cleaned.replace(/^\s*\(?\s*/, ''); // Leading parenthesis
+        
+        // Trim and return with original casing preserved if possible
+        return cleaned.trim();
+    }
+
     initializeSpeechRecognition() {
         if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
             const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
             this.recognition = new SpeechRecognition();
-            this.recognition.continuous = false;
+            this.recognition.continuous = true;
             this.recognition.interimResults = true;
             this.recognition.lang = 'en-US';
 
             this.recognition.onstart = () => {
-                this.isRecording = true;
-                this.updateUI('recording');
+                console.log('🎤 Passive listening started... Say "Volt" to wake me up!');
+                this.updateUI('idle');
             };
 
             this.recognition.onresult = (event) => {
-                const transcript = Array.from(event.results)
-                    .map(result => result[0].transcript)
-                    .join('');
+                let finalTranscript = '';
+                let interimTranscript = '';
+
+                // Process results
+                for (let i = event.resultIndex; i < event.results.length; i++) {
+                    const transcript = event.results[i][0].transcript;
+                    if (event.results[i].isFinal) {
+                        finalTranscript += transcript;
+                    } else {
+                        interimTranscript += transcript;
+                    }
+                }
+
+                const combinedTranscript = (finalTranscript + ' ' + interimTranscript).toLowerCase().trim();
                 
-                this.showTranscript(transcript);
-                
-                if (event.results[0].isFinal) {
-                    this.processVoiceCommand(transcript);
+                // Show real-time transcript
+                this.showTranscript(interimTranscript || finalTranscript);
+
+                // Wake word detection with fuzzy matching
+                if (this.isListeningForWakeWord) {
+                    const detectedWakeWord = this.detectFuzzyWakeWord(combinedTranscript);
+                    if (detectedWakeWord) {
+                        console.log(`⚡ Wake word "${detectedWakeWord}" detected! (fuzzy match for "Volt")`);
+                        this.triggerWakeWordAnimation();
+                        this.isListeningForWakeWord = false;
+                        this.commandBuffer = '';
+                        this.speak('Yes?');
+                        
+                        // Clear the transcript after wake word
+                        setTimeout(() => this.showTranscript(''), 500);
+                    }
+                } else {
+                    // Collecting command after wake word
+                    const commandText = finalTranscript || interimTranscript;
+                    if (commandText.trim()) {
+                        this.commandBuffer = commandText;
+                        this.updateUI('recording');
+                        
+                        // Reset silence timer on new speech
+                        this.resetSilenceTimer();
+                    }
+                    
+                    // Process final results - strip wake word before sending
+                    if (finalTranscript.trim()) {
+                        // Check if wake word is still in the transcript and remove it
+                        const detectedWord = this.detectFuzzyWakeWord(finalTranscript);
+                        const cleanCommand = this.stripWakeWord(finalTranscript, detectedWord);
+                        
+                        console.log('📝 Raw transcript:', finalTranscript);
+                        console.log('🧹 Clean command (wake word stripped):', cleanCommand);
+                        
+                        this.processVoiceCommand(cleanCommand);
+                    }
                 }
             };
 
             this.recognition.onerror = (event) => {
-                console.error('Speech recognition error:', event.error);
-                this.updateUI('error');
-                this.speak('Sorry, I didn\'t catch that. Please try again.');
+                console.warn('Speech recognition error:', event.error);
+
+                if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+                    // Microphone permission denied – can't recover without user action
+                    this.updateUI('not-supported');
+                    const statusText = document.getElementById('statusText');
+                    if (statusText) statusText.textContent = '🎤 Microphone access denied. Please allow mic permission and refresh.';
+                    return;
+                }
+
+                // All other errors (no-speech, audio-capture, network, aborted, etc.)
+                // are recoverable – just restart after a short pause
+                this.updateUI('idle');
+                this._safeRestart(1000);
             };
 
             this.recognition.onend = () => {
-                this.isRecording = false;
-                this.updateUI('idle');
+                // Auto-restart for continuous passive listening
+                if (!this.isRecording) {
+                    this._safeRestart(300);
+                }
             };
+
+            // Start passive listening immediately
+            this.startPassiveListening();
         } else {
             console.error('Speech recognition not supported');
             this.updateUI('not-supported');
         }
+    }
+
+    startPassiveListening() {
+        try {
+            this.recognition.start();
+            this.isListeningForWakeWord = true;
+            this.updateUI('idle');
+        } catch (e) {
+            console.log('Recognition already started');
+        }
+    }
+
+    restartListening() {
+        this._safeRestart(500);
+    }
+
+    _safeRestart(delayMs = 500) {
+        if (this._isRestarting) return;   // already scheduled
+        this._isRestarting = true;
+        setTimeout(() => {
+            this._isRestarting = false;
+            this.isListeningForWakeWord = true;
+            this.isRecording = false;
+            this.commandBuffer = '';
+            this.startPassiveListening();
+        }, delayMs);
+    }
+
+    resetSilenceTimer() {
+        if (this.silenceTimer) {
+            clearTimeout(this.silenceTimer);
+        }
+        this.silenceTimer = setTimeout(() => {
+            if (this.commandBuffer.trim()) {
+                console.log('⏱️ Silence detected, processing command...');
+                this.processVoiceCommand(this.commandBuffer.trim());
+                this.commandBuffer = '';
+                this.isListeningForWakeWord = true;
+                this.updateUI('idle');
+            }
+        }, this.silenceDelay);
+    }
+
+    triggerWakeWordAnimation() {
+        const voiceButton = document.getElementById('voiceButton');
+        if (voiceButton) {
+            // Alexa-style blue ring pulse
+            voiceButton.style.boxShadow = '0 0 0 0 rgba(59, 130, 246, 0.7)';
+            voiceButton.style.animation = 'pulse-blue 1s ease-out';
+            
+            // Add CSS animation if not already present
+            if (!document.getElementById('pulse-animation')) {
+                const style = document.createElement('style');
+                style.id = 'pulse-animation';
+                style.textContent = `
+                    @keyframes pulse-blue {
+                        0% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.7); }
+                        50% { box-shadow: 0 0 0 30px rgba(59, 130, 246, 0); }
+                        100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); }
+                    }
+                    .wake-active {
+                        background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%) !important;
+                        box-shadow: 0 0 20px rgba(59, 130, 246, 0.6) !important;
+                    }
+                `;
+                document.head.appendChild(style);
+            }
+            
+            voiceButton.classList.add('wake-active');
+            
+            setTimeout(() => {
+                voiceButton.classList.remove('wake-active');
+                voiceButton.style.animation = '';
+            }, 2000);
+        }
+        
+        // Show wake indicator
+        this.showToast('⚡ Volt activated! Listening...', 'info');
     }
 
     bindEvents() {
@@ -129,40 +318,52 @@ class VAOMApp {
 
         switch (state) {
             case 'recording':
-                voiceButton.classList.add('recording');
-                voiceButton.innerHTML = '<i class="fas fa-stop text-4xl"></i>';
-                statusText.textContent = 'Listening... Speak now!';
-                transcript.classList.add('hidden');
-                processing.classList.add('hidden');
+                if (voiceButton) {
+                    voiceButton.classList.add('recording', 'wake-active');
+                    voiceButton.innerHTML = '<i class="fas fa-microphone text-4xl"></i>';
+                }
+                if (statusText) statusText.textContent = 'Listening for command...';
+                if (transcript) transcript.classList.remove('hidden');
+                if (processing) processing.classList.add('hidden');
                 break;
             case 'clarification':
-                voiceButton.classList.add('recording', 'bg-orange-500');
-                voiceButton.innerHTML = '<i class="fas fa-microphone text-4xl"></i>';
-                statusText.textContent = 'Waiting for your response...';
-                processing.classList.add('hidden');
+                if (voiceButton) {
+                    voiceButton.classList.add('recording', 'bg-orange-500');
+                    voiceButton.innerHTML = '<i class="fas fa-microphone text-4xl"></i>';
+                }
+                if (statusText) statusText.textContent = 'Waiting for your response...';
+                if (processing) processing.classList.add('hidden');
                 break;
             case 'processing':
-                voiceButton.classList.remove('recording');
-                voiceButton.innerHTML = '<i class="fas fa-microphone text-4xl"></i>';
-                statusText.textContent = 'Processing your command...';
-                processing.classList.remove('hidden');
+                if (voiceButton) {
+                    voiceButton.classList.remove('recording', 'wake-active');
+                    voiceButton.innerHTML = '<i class="fas fa-microphone text-4xl"></i>';
+                }
+                if (statusText) statusText.textContent = 'Processing your command...';
+                if (processing) processing.classList.remove('hidden');
                 break;
             case 'idle':
-                voiceButton.classList.remove('recording', 'bg-orange-500');
-                voiceButton.innerHTML = '<i class="fas fa-microphone text-4xl"></i>';
-                statusText.textContent = 'Click the microphone to start';
-                processing.classList.add('hidden');
+                if (voiceButton) {
+                    voiceButton.classList.remove('recording', 'bg-orange-500', 'wake-active');
+                    voiceButton.innerHTML = '<i class="fas fa-microphone text-4xl"></i>';
+                }
+                if (statusText) statusText.textContent = 'Say "Volt" to wake me up';
+                if (processing) processing.classList.add('hidden');
                 break;
             case 'error':
-                voiceButton.classList.remove('recording', 'bg-orange-500');
-                voiceButton.innerHTML = '<i class="fas fa-microphone text-4xl"></i>';
-                statusText.textContent = 'Error occurred. Try again.';
-                processing.classList.add('hidden');
+                if (voiceButton) {
+                    voiceButton.classList.remove('recording', 'bg-orange-500', 'wake-active');
+                    voiceButton.innerHTML = '<i class="fas fa-microphone text-4xl"></i>';
+                }
+                if (statusText) statusText.textContent = 'Error occurred. Restarting...';
+                if (processing) processing.classList.add('hidden');
                 break;
             case 'not-supported':
-                voiceButton.disabled = true;
-                voiceButton.classList.add('opacity-50', 'cursor-not-allowed');
-                statusText.textContent = 'Speech recognition not supported in your browser';
+                if (voiceButton) {
+                    voiceButton.disabled = true;
+                    voiceButton.classList.add('opacity-50', 'cursor-not-allowed');
+                }
+                if (statusText) statusText.textContent = 'Speech recognition not supported in your browser';
                 break;
         }
     }
@@ -178,25 +379,14 @@ class VAOMApp {
     async processVoiceCommand(transcript) {
         this.updateUI('processing');
         
+        // Clear silence timer
+        if (this.silenceTimer) {
+            clearTimeout(this.silenceTimer);
+        }
+        
         try {
-            // Check for context reset phrases
-            const contextResetPhrases = ['no', 'wait', 'actually', 'scratch that', 'never mind', 'cancel', 'changed my mind'];
-            const hasContextReset = contextResetPhrases.some(phrase => 
-                transcript.toLowerCase().includes(phrase)
-            );
-            
-            if (hasContextReset && this.lastOrderId) {
-                this.showToast('🔄 Correction detected - clearing pending order visual', 'warning');
-                // Clear any optimistic UI for the last order
-                const lastOrderRow = document.getElementById(`order-${this.lastOrderId}`);
-                if (lastOrderRow) {
-                    lastOrderRow.classList.remove('optimistic-adding', 'glow-green');
-                    lastOrderRow.classList.add('optimistic-updating');
-                }
-            }
-            
-            // Send to NEW Gemini AI endpoint
-            const response = await fetch(`${this.apiBaseUrl}/voice-process`, {
+            // Send to voice intent endpoint
+            const response = await fetch(`${this.apiBaseUrl}/voice-intent`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -210,16 +400,11 @@ class VAOMApp {
             });
 
             const geminiResponse = await response.json();
-            console.log('Gemini AI Response:', geminiResponse);
+            console.log('⚡ Volt Response:', geminiResponse);
             
-            // Apply optimistic UI immediately (before database confirms)
+            // Apply optimistic UI immediately
             if (geminiResponse.optimistic_ui) {
                 this.applyOptimisticUI(geminiResponse.optimistic_ui);
-            }
-            
-            // Handle context reset
-            if (geminiResponse.context_reset) {
-                this.showToast('✏️ Correction processed: ' + geminiResponse.voice_response, 'info');
             }
             
             // Update analytics display
@@ -248,8 +433,12 @@ class VAOMApp {
             
         } catch (error) {
             console.error('Error processing voice command:', error);
-            this.speak('Sorry, there was an error processing your request.');
+            this.speak('Sorry, I didn\'t catch that. Please say Volt and try again.');
         } finally {
+            // Return to passive listening
+            this.isListeningForWakeWord = true;
+            this.isRecording = false;
+            this.commandBuffer = '';
             this.updateUI('idle');
         }
     }
@@ -266,7 +455,7 @@ class VAOMApp {
         return {
             action: 'CREATE',
             data: { item, quantity },
-            voice_response: `Placing an order for ${quantity} ${item}${quantity > 1 ? 's' : ''}.`
+            voice_response: `Wonderful choice! Adding ${quantity} ${item}${quantity > 1 ? 's' : ''} to your order right away.`
         };
     }
 
@@ -276,7 +465,7 @@ class VAOMApp {
             return {
                 action: 'TRACK',
                 data: { order_id: parseInt(orderMatch[1]) },
-                voice_response: `Checking the status of order ${orderMatch[1]}.`
+                voice_response: `Let me check on order ${orderMatch[1]} for you. One moment!`
             };
         } else {
             const items = ['pizza', 'burger', 'coffee', 'sandwich', 'salad', 'pasta'];
@@ -284,7 +473,7 @@ class VAOMApp {
             return {
                 action: 'TRACK',
                 data: { item },
-                voice_response: `Checking the status of your ${item} order.`
+                voice_response: `I'll look up your ${item} order status right now.`
             };
         }
     }
@@ -300,14 +489,14 @@ class VAOMApp {
                     order_id: parseInt(orderMatch[1]),
                     quantity: quantityMatch ? parseInt(quantityMatch[1]) : null
                 },
-                voice_response: `Updating order ${orderMatch[1]}.`
+                voice_response: `Sure thing! Updating order ${orderMatch[1]} for you.`
             };
         }
         
         return {
             action: 'CLARIFY',
             data: null,
-            voice_response: 'Please specify which order you want to update.'
+            voice_response: "I'd be happy to update that! Which order would you like me to change?"
         };
     }
 
@@ -317,14 +506,14 @@ class VAOMApp {
             return {
                 action: 'DELETE',
                 data: { order_id: parseInt(orderMatch[1]) },
-                voice_response: `Cancelling order ${orderMatch[1]}.`
+                voice_response: `No problem at all! Cancelling order ${orderMatch[1]} for you.`
             };
         }
         
         return {
             action: 'CLARIFY',
             data: null,
-            voice_response: 'Please specify which order you want to cancel.'
+            voice_response: "I'd be happy to cancel that for you. Which order should I remove?"
         };
     }
 
@@ -575,6 +764,11 @@ class VAOMApp {
         if (environmentElement) {
             environmentElement.textContent = this.environment;
         }
+        
+        // Welcome greeting after voices load
+        setTimeout(() => {
+            this.speak("Hello! I'm Volt, your AI assistant. Just say my name to get started!");
+        }, 2000);
     }
     
     async loadAnalytics() {
@@ -826,23 +1020,81 @@ class VAOMApp {
         }
     }
 
-    speak(text) {
-        if (this.synthesis.speaking) {
-            this.synthesis.cancel();
+    // ElevenLabs TTS - Ultra-realistic AI voice
+    async speak(text) {
+        try {
+            console.log('🎙️ Speaking:', text);
+            
+            // Cancel any ongoing speech
+            if (this.synthesis?.speaking) {
+                this.synthesis.cancel();
+            }
+            
+            // Use ElevenLabs API for ultra-realistic voice
+            const response = await fetch('https://api.elevenlabs.io/v1/text-to-speech/rachel', {
+                method: 'POST',
+                headers: {
+                    'xi-api-key': 'sk_4f2c8b3a2e1c4a5d8b9c6d7e8f9a0b1c', // Replace with your API key
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    text: text,
+                    model_id: 'eleven_monolingual_v1',
+                    voice_settings: {
+                        stability: 0.75,
+                        similarity_boost: 0.75
+                    }
+                })
+            });
+            
+            if (!response.ok) {
+                throw new Error('ElevenLabs API failed');
+            }
+            
+            const audioBlob = await response.blob();
+            const audioUrl = URL.createObjectURL(audioBlob);
+            const audio = new Audio(audioUrl);
+            
+            audio.play();
+            
+            // Clean up URL after audio plays
+            audio.addEventListener('ended', () => {
+                URL.revokeObjectURL(audioUrl);
+            });
+            
+        } catch (error) {
+            console.error('ElevenLabs TTS failed, falling back to browser TTS:', error);
+            
+            // Fallback to browser TTS if ElevenLabs fails
+            if (!this.synthesis) {
+                this.synthesis = window.speechSynthesis;
+            }
+            
+            const utterance = new SpeechSynthesisUtterance(text);
+            utterance.pitch = 1.1;
+            utterance.rate = 0.9;
+            utterance.volume = 1.0;
+            
+            // Try to get a good voice
+            const voices = this.synthesis.getVoices();
+            const preferredVoice = voices.find(voice => 
+                voice.name.includes('Google') && 
+                voice.name.includes('UK') && 
+                voice.name.includes('Female')
+            ) || voices.find(voice => voice.name.includes('Google')) || voices[0];
+            
+            if (preferredVoice) {
+                utterance.voice = preferredVoice;
+                console.log('🎙️ Using fallback voice:', preferredVoice.name);
+            }
+            
+            this.synthesis.speak(utterance);
         }
-        
-        const utterance = new SpeechSynthesisUtterance(text);
-        utterance.rate = 1.0;
-        utterance.pitch = 1.0;
-        utterance.volume = 1.0;
-        
-        this.synthesis.speak(utterance);
     }
-
+    
     showToast(message, type = 'success') {
-        // Create toast element
         const toast = document.createElement('div');
-        toast.className = `fixed top-4 right-4 px-6 py-3 rounded-lg shadow-lg z-50 transform transition-all duration-300 translate-x-full`;
+        toast.className = 'fixed top-4 right-4 p-4 rounded-lg shadow-lg transform transition-all duration-300 translate-x-full z-50';
         
         // Style based on type
         if (type === 'error') {

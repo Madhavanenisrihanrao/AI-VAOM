@@ -13,11 +13,12 @@ const PORT = process.env.PORT || 3001;
 // Middleware
 app.use(cors());
 app.use(express.json());
+app.use(express.static('.'));
 
 // Supabase client initialization
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
+  process.env.SUPABASE_KEY
 );
 
 // In-memory session storage for context memory and confirmation state
@@ -111,14 +112,31 @@ function processExecutiveController(user_input, last_id = null, is_waiting_for_c
     return response;
   }
   
-  // MULTI-COMMANDS - Parse multiple items with "and"
+  // MULTI-COMMANDS - Parse multiple items with "and" or "with" (for replace commands)
   const items_list = [];
-  const andPattern = /(.+?)\s+and\s+(.+)/i;
-  const multiMatch = input.match(andPattern);
+  let parts = [];
   
-  if (multiMatch) {
-    // Process multiple items
-    const parts = [multiMatch[1], multiMatch[2]];
+  // Check for "replace X with Y" or "swap X for Y" patterns
+  if (input.includes('replace') || input.includes('swap')) {
+    // Try to split on "with" or "for" for replace commands
+    const withPattern = /(.+?)\s+(?:with|for)\s+(.+)/i;
+    const withMatch = input.match(withPattern);
+    if (withMatch) {
+      parts = [withMatch[1], withMatch[2]];
+    }
+  }
+  
+  // If no "with" match, try "and" pattern
+  if (parts.length === 0) {
+    const andPattern = /(.+?)\s+and\s+(.+)/i;
+    const multiMatch = input.match(andPattern);
+    if (multiMatch) {
+      parts = [multiMatch[1], multiMatch[2]];
+    }
+  }
+  
+  // Parse each part for items
+  if (parts.length > 0) {
     for (const part of parts) {
       const itemData = parseItemFromText(part);
       if (itemData.item) {
@@ -150,14 +168,14 @@ function processExecutiveController(user_input, last_id = null, is_waiting_for_c
   if (input.includes('order') || input.includes('buy') || input.includes('want') || input.includes('get') || input.includes('add')) {
     if (items_list.length === 0) {
       response.action = 'CLARIFY';
-      response.voice_response = isKioskMode ? 'What item?' : 'Sure! What would you like to order?';
+      response.voice_response = isKioskMode ? 'What item?' : "I'd love to help you with that! What would you like to order today?";
       response.dashboard_hint = 'Awaiting item selection...';
       response.analytics.intent_confidence = 0.3;
     } else if (items_list.some(item => !item.qty)) {
       response.action = 'CLARIFY';
       response.data.items_list = items_list;
       const missingItem = items_list.find(item => !item.qty);
-      response.voice_response = isKioskMode ? `How many ${missingItem.item}s?` : `Great! How many ${missingItem.item}${missingItem.qty !== 1 ? 's' : ''} would you like?`;
+      response.voice_response = isKioskMode ? `How many ${missingItem.item}s?` : `Perfect choice! How many ${missingItem.item}s would you like?`;
       response.dashboard_hint = 'Awaiting quantity...';
       response.analytics.intent_confidence = 0.6;
     } else {
@@ -168,12 +186,13 @@ function processExecutiveController(user_input, last_id = null, is_waiting_for_c
       if (totalQuantity > 5) {
         response.data.require_confirmation = true;
         response.action = 'CLARIFY';
-        response.voice_response = isKioskMode ? `${totalQuantity} items, confirm?` : `That's ${totalQuantity} items. Are you sure you want to place this large order?`;
+        response.voice_response = isKioskMode ? `${totalQuantity} items, confirm?` : `That's quite a lot - ${totalQuantity} items! Are you sure you'd like me to place this order?`;
         response.dashboard_hint = 'Confirmation required for large order';
         response.optimistic_ui.action_preview = 'PREPARING_LARGE_ORDER';
         response.optimistic_ui.highlight_color = '#ef4444'; // Red for large orders
       } else {
-        response.voice_response = isKioskMode ? `Adding ${items_list.map(i => i.item).join(', ')}.` : `Placing order for ${items_list.map(i => `${i.qty} ${i.item}${i.qty > 1 ? 's' : ''}`).join(' and ')}.`;
+        const itemStr = items_list.map(i => `${i.qty} ${i.item}${i.qty > 1 ? 's' : ''}`).join(' and ');
+        response.voice_response = isKioskMode ? `Adding ${items_list.map(i => i.item).join(', ')}.` : `Wonderful! I've added ${itemStr} to your order. Anything else you'd like?`;
         response.dashboard_hint = `Analytics update: +${response.analytics.time_saved}s saved`;
         response.optimistic_ui.action_preview = 'ADDING_ITEMS';
         response.optimistic_ui.highlight_color = '#22c55e'; // Green for success
@@ -226,20 +245,54 @@ function processExecutiveController(user_input, last_id = null, is_waiting_for_c
     }
   }
   else if (input.includes('cancel') || input.includes('delete') || input.includes('remove')) {
-    if (!response.data.order_id) {
-      response.action = 'CLARIFY';
-      response.voice_response = isKioskMode ? 'Which order?' : 'Which order would you like to cancel? Please provide the order number.';
-      response.dashboard_hint = 'Awaiting order ID...';
-      response.analytics.intent_confidence = 0.4;
-    } else {
-      response.action = 'CLARIFY'; // Always clarify for safety
-      response.data.order_id = response.data.order_id;
-      response.data.require_confirmation = true;
+    if (items_list.length > 0) {
+      // If we have an item, go ahead and delete it
+      response.action = 'DELETE';
+      response.data.items_list = items_list;
       response.analytics.time_saved = 10; // DELETE = 10s
-      response.voice_response = isKioskMode ? `Delete order ${response.data.order_id}?` : `Are you sure you want to cancel order ${response.data.order_id}?`;
-      response.dashboard_hint = 'Confirmation required for deletion';
+      response.voice_response = isKioskMode ? `Cancelling ${items_list[0].item}.` : `No problem! I'll cancel those ${items_list[0].item}s for you right away.`;
+      response.dashboard_hint = `Cancelling ${items_list[0].item} order...`;
       response.optimistic_ui.action_preview = 'HIDING_ROW';
       response.optimistic_ui.highlight_color = '#ef4444'; // Red for deletion
+    } else if (response.data.order_id) {
+      // If we have an order ID but no item name
+      response.action = 'DELETE';
+      response.analytics.time_saved = 10;
+      response.voice_response = isKioskMode ? `Cancelling order ${response.data.order_id}.` : `Of course! I'm cancelling order number ${response.data.order_id} for you now.`;
+      response.dashboard_hint = `Cancelling order #${response.data.order_id}...`;
+      response.optimistic_ui.action_preview = 'HIDING_ROW';
+      response.optimistic_ui.highlight_color = '#ef4444';
+    } else {
+      response.action = 'CLARIFY';
+      response.voice_response = isKioskMode ? 'Which order?' : `I'd be happy to cancel that for you. Which order would you like me to remove?`;
+      response.dashboard_hint = 'Awaiting order details...';
+      response.analytics.intent_confidence = 0.4;
+    }
+  }
+  else if (input.includes('replace') || input.includes('swap')) {
+    // Handle replace action - need two items
+    if (items_list.length >= 2) {
+      response.action = 'REPLACE';
+      response.data.old_item = items_list[0].item;
+      response.data.new_item = items_list[1].item;
+      response.data.items_list = items_list;
+      response.analytics.time_saved = 25; // REPLACE = 25s (delete + create)
+      response.voice_response = isKioskMode ? `Replacing ${items_list[0].item} with ${items_list[1].item}.` : `Got it! I'll swap your ${items_list[0].item} for ${items_list[1].item}. One moment please!`;
+      response.dashboard_hint = `Replacing ${items_list[0].item} with ${items_list[1].item}...`;
+      response.optimistic_ui.action_preview = 'REPLACING_ITEM';
+      response.optimistic_ui.highlight_color = '#f59e0b'; // Amber for replacement
+    } else if (items_list.length === 1) {
+      // Only have one item, need clarification
+      response.action = 'CLARIFY';
+      response.data.items_list = items_list;
+      response.voice_response = isKioskMode ? 'Replace with what?' : `Sure thing! What would you like to replace your ${items_list[0].item} with?`;
+      response.dashboard_hint = 'Awaiting replacement item...';
+      response.analytics.intent_confidence = 0.5;
+    } else {
+      response.action = 'CLARIFY';
+      response.voice_response = isKioskMode ? 'What to replace?' : `Happy to help with that! What item would you like to replace, and what should I put in its place?`;
+      response.dashboard_hint = 'Awaiting items to replace...';
+      response.analytics.intent_confidence = 0.3;
     }
   }
   
@@ -271,16 +324,102 @@ function calculateIntentConfidence(input, items_list, order_id) {
 }
 
 /**
- * Helper function to parse item and quantity from text
+ * Helper function to parse item and quantity from text with fuzzy matching
  */
 function parseItemFromText(text) {
-  const items = ['pizza', 'burger', 'coffee', 'sandwich', 'salad', 'pasta', 'drink', 'water', 'soda', 'fries', 'chicken'];
-  const item = items.find(i => text.includes(i)) || null;
+  const lowerText = text.toLowerCase();
   
-  const quantityMatch = text.match(/\b(\d+)\b/);
-  const quantity = quantityMatch ? parseInt(quantityMatch[1]) : (item ? 1 : null);
+  // Extended food vocabulary with aliases for common mishearings
+  const foodItems = [
+    // Original items
+    { name: 'pizza', aliases: ['pizza', 'pizzas', 'piza', 'pizaa', 'pitza', 'peices', 'pieces', 'peece', 'pees', 'peez', 'peetza'] },
+    { name: 'burger', aliases: ['burger', 'burgers', 'burder', 'burgr', 'bgr', 'berder'] },
+    { name: 'coffee', aliases: ['coffee', 'coffees', 'cofee', 'coffe', 'koffee', 'cafe', 'cofe'] },
+    { name: 'sandwich', aliases: ['sandwich', 'sandwiches', 'sandwhich', 'sandwitch', 'sndwich'] },
+    { name: 'salad', aliases: ['salad', 'salads', 'slad', 'sallad'] },
+    { name: 'pasta', aliases: ['pasta', 'pastas', 'pastaa', 'pastta'] },
+    { name: 'drink', aliases: ['drink', 'drinks', 'beverage'] },
+    { name: 'water', aliases: ['water', 'waters'] },
+    { name: 'soda', aliases: ['soda', 'sodas', 'pop', 'coke', 'pepsi'] },
+    { name: 'fries', aliases: ['fries', 'fry', 'french fries', 'chips'] },
+    { name: 'chicken', aliases: ['chicken', 'chickens', 'chikn', 'chiken'] },
+    // Additional common items
+    { name: 'noodles', aliases: ['noodles', 'noodle', 'pasta', 'ramen'] },
+    { name: 'rice', aliases: ['rice', 'rices', 'fried rice'] },
+    { name: 'steak', aliases: ['steak', 'steaks', 'beef'] },
+    { name: 'fish', aliases: ['fish', 'fishes', 'seafood'] },
+    { name: 'soup', aliases: ['soup', 'soups', 'broth'] },
+    { name: 'taco', aliases: ['taco', 'tacos', 'burrito', 'burritos'] },
+    { name: 'sushi', aliases: ['sushi', 'sashimi', 'roll', 'rolls'] },
+    { name: 'donut', aliases: ['donut', 'donuts', 'doughnut', 'doughnuts'] },
+    { name: 'cake', aliases: ['cake', 'cakes', 'pastry'] },
+    { name: 'ice cream', aliases: ['ice cream', 'icecream', 'gelato'] },
+    { name: 'tea', aliases: ['tea', 'teas', 'chai', 'green tea'] },
+    { name: 'juice', aliases: ['juice', 'juices', 'smoothie'] },
+    { name: 'milk', aliases: ['milk', 'milks'] },
+    { name: 'beer', aliases: ['beer', 'beers', 'wine', 'alcohol'] },
+    { name: 'bread', aliases: ['bread', 'breads', 'loaf'] },
+    { name: 'croissant', aliases: ['croissant', 'croissants', 'pastry'] },
+    { name: 'muffin', aliases: ['muffin', 'muffins'] },
+    { name: 'pancake', aliases: ['pancake', 'pancakes', 'waffle', 'waffles'] },
+    { name: 'egg', aliases: ['egg', 'eggs', 'omelette'] },
+    { name: 'bacon', aliases: ['bacon', 'bacons'] },
+    { name: 'ham', aliases: ['ham', 'hams', 'prosciutto'] },
+    { name: 'cheese', aliases: ['cheese', 'cheeses'] },
+    { name: 'fruit', aliases: ['fruit', 'fruits', 'apple', 'banana', 'orange'] },
+    { name: 'vegetable', aliases: ['vegetable', 'vegetables', 'veggie', 'veggies'] },
+    { name: 'chocolate', aliases: ['chocolate', 'chocolates', 'candy', 'sweet'] },
+    { name: 'cookie', aliases: ['cookie', 'cookies', 'biscuit'] },
+    { name: 'pie', aliases: ['pie', 'pies'] }
+  ];
   
-  return { item, qty: quantity };
+  // Try to find a matching item
+  let matchedItem = null;
+  let bestMatchScore = 0;
+  
+  for (const food of foodItems) {
+    for (const alias of food.aliases) {
+      // Exact match gets highest score
+      if (lowerText.includes(alias)) {
+        const score = alias.length; // Longer matches are more specific
+        if (score > bestMatchScore) {
+          bestMatchScore = score;
+          matchedItem = food.name;
+        }
+      }
+    }
+  }
+  
+  // Extract quantity - look for numbers and number words
+  let quantity = null;
+  
+  // Number words mapping
+  const numberWords = {
+    'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
+    'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
+    'eleven': 11, 'twelve': 12, 'dozen': 12, 'half dozen': 6
+  };
+  
+  // Check for digit numbers first
+  const digitMatch = text.match(/\b(\d+)\b/);
+  if (digitMatch) {
+    quantity = parseInt(digitMatch[1]);
+  } else {
+    // Check for word numbers
+    for (const [word, num] of Object.entries(numberWords)) {
+      if (lowerText.includes(word)) {
+        quantity = num;
+        break;
+      }
+    }
+  }
+  
+  // If no quantity found but we have an item, default to 1
+  if (matchedItem && !quantity) {
+    quantity = 1;
+  }
+  
+  return { item: matchedItem, qty: quantity };
 }
 
 /**
@@ -359,6 +498,13 @@ app.post('/api/orders', async (req, res) => {
       console.error('Error creating order:', error);
       return res.status(500).json({ error: 'Failed to create order' });
     }
+    
+    // Live Monitor Log
+    console.log('\n📦 NEW ORDER RECEIVED');
+    console.log(`Item: ${data[0].item}`);
+    console.log(`Quantity: ${data[0].quantity}`);
+    console.log(`Status: ${data[0].status}`);
+    console.log('------------------------\n');
     
     res.status(201).json(data[0]);
   } catch (error) {
@@ -570,6 +716,13 @@ app.post('/api/voice-process', async (req, res) => {
         response.data.order_id = savedOrder.id;
         response.data.saved_order = savedOrder;
         
+        // Live Monitor Log
+        console.log('\n📦 NEW ORDER RECEIVED');
+        console.log(`Item: ${savedOrder.item}`);
+        console.log(`Quantity: ${savedOrder.quantity}`);
+        console.log(`Status: ${savedOrder.status}`);
+        console.log('------------------------\n');
+        
         // Update session context
         sessionContext.set(sessionId, savedOrder.id);
         
@@ -590,7 +743,7 @@ app.post('/api/voice-process', async (req, res) => {
 });
 
 // Enhanced voice intent processing endpoint with Executive Controller logic
-app.post('/api/voice-intent', (req, res) => {
+app.post('/api/voice-intent', async (req, res) => {
   try {
     const { 
       command, 
@@ -626,7 +779,7 @@ app.post('/api/voice-intent', (req, res) => {
       businessAnalytics.set(sessionId, currentTotal + executiveResponse.analytics.time_saved);
     }
     
-    // Handle confirmation state management
+    // Handle confirmation state management and execute database actions
     if (executiveResponse.action === 'CLARIFY' && executiveResponse.data.require_confirmation) {
       pendingConfirmations.set(sessionId, true);
       // Store the pending action data for execution
@@ -636,6 +789,244 @@ app.post('/api/voice-intent', (req, res) => {
       const pendingData = sessionContext.get(sessionId + '_pending');
       if (pendingData) {
         executiveResponse.data = pendingData;
+      }
+      pendingConfirmations.delete(sessionId);
+      sessionContext.delete(sessionId + '_pending');
+    } else if (executiveResponse.action === 'CREATE' && !executiveResponse.data.require_confirmation) {
+      // Actually save order to database
+      const items = executiveResponse.data.items_list;
+      if (items && items.length > 0) {
+        const savedOrders = [];
+        for (const itemData of items) {
+          const { data, error } = await supabase
+            .from('orders')
+            .insert([{ 
+              item: itemData.item, 
+              quantity: itemData.qty || 1, 
+              status: 'pending',
+              price: 0.0
+            }])
+            .select()
+            .single();
+          
+          if (error) {
+            console.error('Error saving order:', error);
+          } else {
+            savedOrders.push(data);
+            console.log('\n➕ CREATE: New order created');
+            console.log(`   Item: ${data.item}`);
+            console.log(`   Quantity: ${data.quantity}`);
+            console.log(`   Status: ${data.status}`);
+            console.log(`   Order ID: ${data.id}`);
+            console.log('------------------------\n');
+          }
+        }
+        
+        if (savedOrders.length > 0) {
+          executiveResponse.data.saved_order = savedOrders[0];
+          executiveResponse.data.order_id = savedOrders[0].id;
+        }
+      }
+      pendingConfirmations.delete(sessionId);
+      sessionContext.delete(sessionId + '_pending');
+    } else if (executiveResponse.action === 'DELETE') {
+      // Find and delete pending order(s) for the item with quantity support
+      const items = executiveResponse.data.items_list;
+      const itemToDelete = items && items.length > 0 ? items[0].item : null;
+      const deleteQty = items && items[0] ? (items[0].qty || 1) : 1;
+      const isDeleteAll = input.includes('all');
+      
+      if (itemToDelete) {
+        // Find all pending orders for this item
+        const { data: orders, error: findError } = await supabase
+          .from('orders')
+          .select('*')
+          .eq('item', itemToDelete)
+          .eq('status', 'pending')
+          .order('created_at', { ascending: false });
+        
+        if (!findError && orders && orders.length > 0) {
+          let deletedCount = 0;
+          let deletedOrders = [];
+          let totalDeletedQty = 0;
+          const targetQty = isDeleteAll ? Infinity : deleteQty;
+          
+          // Delete orders until we've removed targetQty items
+          for (const order of orders) {
+            if (totalDeletedQty >= targetQty) break;
+            
+            const { error: deleteError } = await supabase
+              .from('orders')
+              .delete()
+              .eq('id', order.id);
+            
+            if (!deleteError) {
+              deletedOrders.push(order);
+              totalDeletedQty += order.quantity;
+              deletedCount++;
+            }
+          }
+          
+          if (deletedCount > 0) {
+            executiveResponse.data.deleted_orders = deletedOrders;
+            executiveResponse.data.order_id = deletedOrders[0].id;
+            
+            if (isDeleteAll) {
+              executiveResponse.voice_response = `Cancelled all ${totalDeletedQty} ${itemToDelete} orders.`;
+              console.log('\n🗑️ DELETE: All orders cancelled');
+            } else {
+              executiveResponse.voice_response = `Cancelled ${totalDeletedQty} ${itemToDelete}.`;
+              console.log('\n🗑️ DELETE: Order(s) cancelled');
+            }
+            console.log(`   Item: ${itemToDelete}`);
+            console.log(`   Orders deleted: ${deletedCount}`);
+            console.log(`   Total quantity: ${totalDeletedQty}`);
+            console.log('------------------------\n');
+          } else {
+            executiveResponse.voice_response = `No pending ${itemToDelete} orders found to cancel.`;
+          }
+        } else {
+          executiveResponse.voice_response = `No pending ${itemToDelete} orders found to cancel.`;
+        }
+      }
+      pendingConfirmations.delete(sessionId);
+      sessionContext.delete(sessionId + '_pending');
+    } else if (executiveResponse.action === 'UPDATE') {
+      // Find and update the most recent pending order
+      const items = executiveResponse.data.items_list;
+      
+      if (items && items.length > 0) {
+        const itemToUpdate = items[0].item;
+        const newQty = items[0].qty || 1;
+        
+        // Find the most recent pending order for this item
+        const { data: orders, error: findError } = await supabase
+          .from('orders')
+          .select('*')
+          .eq('item', itemToUpdate)
+          .eq('status', 'pending')
+          .order('created_at', { ascending: false })
+          .limit(1);
+        
+        if (!findError && orders && orders.length > 0) {
+          const orderToUpdate = orders[0];
+          
+          // Update the quantity
+          const { data, error: updateError } = await supabase
+            .from('orders')
+            .update({ quantity: newQty, updated_at: new Date().toISOString() })
+            .eq('id', orderToUpdate.id)
+            .select()
+            .single();
+          
+          if (!updateError) {
+            executiveResponse.data.updated_order = data;
+            executiveResponse.data.order_id = data.id;
+            executiveResponse.voice_response = `Updated ${data.item} quantity to ${newQty}.`;
+            console.log('\n✏️ UPDATE: Order updated');
+            console.log(`   Item: ${data.item}`);
+            console.log(`   New Quantity: ${newQty}`);
+            console.log(`   Order ID: ${data.id}`);
+            console.log('------------------------\n');
+          }
+        }
+      }
+      pendingConfirmations.delete(sessionId);
+      sessionContext.delete(sessionId + '_pending');
+    } else if (executiveResponse.action === 'TRACK') {
+      // Find and return the status of the most recent order
+      const items = executiveResponse.data.items_list;
+      const itemToTrack = items && items.length > 0 ? items[0].item : null;
+      
+      if (itemToTrack) {
+        const { data: orders, error: findError } = await supabase
+          .from('orders')
+          .select('*')
+          .eq('item', itemToTrack)
+          .order('created_at', { ascending: false })
+          .limit(1);
+        
+        if (!findError && orders && orders.length > 0) {
+          const order = orders[0];
+          executiveResponse.data.order_status = order.status;
+          executiveResponse.data.order_id = order.id;
+          executiveResponse.voice_response = `Your ${order.item} is currently ${order.status}.`;
+          console.log('\n🔍 TRACK: Order status checked');
+          console.log(`   Item: ${order.item}`);
+          console.log(`   Status: ${order.status}`);
+          console.log(`   Order ID: ${order.id}`);
+          console.log('------------------------\n');
+        } else {
+          executiveResponse.voice_response = `No order found for ${itemToTrack}.`;
+        }
+      }
+      pendingConfirmations.delete(sessionId);
+      sessionContext.delete(sessionId + '_pending');
+    } else if (executiveResponse.action === 'REPLACE') {
+      // Execute replace: delete old item order(s), create new item order
+      const oldItem = executiveResponse.data.old_item;
+      const newItem = executiveResponse.data.new_item;
+      const items = executiveResponse.data.items_list;
+      const oldQty = items && items[0] ? (items[0].qty || 1) : 1;
+      const newQty = items && items[1] ? (items[1].qty || 1) : 1;
+      
+      if (oldItem && newItem) {
+        // Find pending orders for oldItem
+        const { data: orders, error: findError } = await supabase
+          .from('orders')
+          .select('*')
+          .eq('item', oldItem)
+          .eq('status', 'pending')
+          .order('created_at', { ascending: false });
+        
+        if (!findError && orders && orders.length > 0) {
+          let deletedCount = 0;
+          let deletedOrders = [];
+          let totalDeletedQty = 0;
+          
+          // Delete orders until we've removed oldQty items
+          for (const order of orders) {
+            if (totalDeletedQty >= oldQty) break;
+            
+            const { error: deleteError } = await supabase
+              .from('orders')
+              .delete()
+              .eq('id', order.id);
+            
+            if (!deleteError) {
+              deletedOrders.push(order);
+              totalDeletedQty += order.quantity;
+              deletedCount++;
+            }
+          }
+          
+          if (deletedCount > 0) {
+            // Create new order with newQty
+            const { data: newOrder, error: insertError } = await supabase
+              .from('orders')
+              .insert([{
+                item: newItem,
+                quantity: newQty,
+                price: 0.0,
+                status: 'pending'
+              }])
+              .select()
+              .single();
+            
+            if (!insertError) {
+              executiveResponse.data.deleted_orders = deletedOrders;
+              executiveResponse.data.new_order = newOrder;
+              executiveResponse.data.order_id = newOrder.id;
+              executiveResponse.voice_response = `Replaced ${totalDeletedQty} ${oldItem} with ${newQty} ${newItem}.`;
+              console.log('\n🔄 REPLACE: Order(s) replaced');
+              console.log(`   Deleted: ${deletedCount} order(s) of ${oldItem} (total qty: ${totalDeletedQty})`);
+              console.log(`   Created: ${newOrder.item} x${newQty} (ID: ${newOrder.id})`);
+              console.log('------------------------\n');
+            }
+          }
+        } else {
+          executiveResponse.voice_response = `No pending ${oldItem} order found to replace.`;
+        }
       }
       pendingConfirmations.delete(sessionId);
       sessionContext.delete(sessionId + '_pending');
@@ -661,7 +1052,7 @@ app.post('/api/voice-intent', (req, res) => {
       isWaitingForConfirm,
       response: executiveResponse
     });
-    
+
     res.json({
       command,
       sessionId,
@@ -716,6 +1107,49 @@ app.get('/api/health', (req, res) => {
     timestamp: new Date().toISOString(),
     service: 'VAOM Backend'
   });
+});
+
+// Test Supabase connection - insert test order
+app.post('/api/test-connection', async (req, res) => {
+  try {
+    const testOrder = {
+      item: 'test-item',
+      quantity: 1,
+      price: 0.0,
+      status: 'pending'
+    };
+    
+    console.log('Testing Supabase connection with:', testOrder);
+    
+    const { data, error } = await supabase
+      .from('orders')
+      .insert([testOrder])
+      .select()
+      .single();
+    
+    if (error) {
+      console.error('Supabase test insert failed:', error);
+      return res.status(500).json({
+        success: false,
+        error: error.message,
+        details: error
+      });
+    }
+    
+    console.log('Test order inserted successfully:', data);
+    res.json({
+      success: true,
+      message: 'Supabase connection working! Test order inserted.',
+      insertedData: data
+    });
+    
+  } catch (error) {
+    console.error('Test connection error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
 });
 
 // Error handling middleware
