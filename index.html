@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice-Activated Order Management (VAOM)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        @keyframes pulse-ring {
+            0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
+            70% { transform: scale(1); box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+            100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+        }
+        
+        .recording { animation: pulse-ring 1.5s infinite; }
+        
+        @keyframes confetti-fall {
+            0% { transform: translateY(-100vh) rotate(0deg); opacity: 1; }
+            100% { transform: translateY(100vh) rotate(720deg); opacity: 0; }
+        }
+        
+        .confetti {
+            position: fixed;
+            width: 10px;
+            height: 10px;
+            animation: confetti-fall 3s linear forwards;
+            z-index: 1000;
+        }
+        
+        .processing {
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+        
+        .fade-out {
+            animation: fadeOut 0.5s ease-out forwards;
+        }
+        
+        @keyframes fadeOut {
+            from { opacity: 1; transform: translateX(0); }
+            to { opacity: 0; transform: translateX(20px); }
+        }
+        
+        /* Executive Controller UI Effects */
+        .glow-green {
+            animation: glow-green-fade 2s infinite;
+            background-color: rgba(34, 197, 94, 0.2);
+        }
+        
+        .pulse-red {
+            animation: pulse-red-fade 1.5s infinite;
+            border: 2px solid #ef4444;
+        }
+        
+        .bounce-blue {
+            animation: bounce-blue-fade 1s infinite;
+            background-color: rgba(59, 130, 246, 0.2);
+        }
+        
+        /* Optimistic UI Effects */
+        .optimistic-adding {
+            animation: optimistic-add 0.3s ease-out;
+            background-color: rgba(34, 197, 94, 0.3);
+        }
+        
+        .optimistic-hiding {
+            animation: optimistic-hide 0.3s ease-out;
+            opacity: 0.3;
+            transform: translateX(10px);
+        }
+        
+        .optimistic-updating {
+            animation: optimistic-update 0.3s ease-out;
+            background-color: rgba(245, 158, 11, 0.3);
+        }
+        
+        @keyframes optimistic-add {
+            0% { transform: scale(0.95); opacity: 0.5; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+        
+        @keyframes optimistic-hide {
+            0% { opacity: 1; transform: translateX(0); }
+            100% { opacity: 0.3; transform: translateX(10px); }
+        }
+        
+        @keyframes optimistic-update {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.02); }
+            100% { transform: scale(1); }
+        }
+        
+        @keyframes glow-green-fade {
+            0% { box-shadow: 0 0 5px #22c55e; }
+            50% { box-shadow: 0 0 20px #22c55e; }
+            100% { box-shadow: 0 0 5px #22c55e; }
+        }
+        
+        @keyframes pulse-red-fade {
+            0% { box-shadow: 0 0 5px #ef4444; }
+            50% { box-shadow: 0 0 20px #ef4444; }
+            100% { box-shadow: 0 0 5px #ef4444; }
+        }
+        
+        @keyframes bounce-blue-fade {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-5px); }
+        }
+    </style>
+</head>
+<body class="bg-gradient-to-br from-blue-50 to-indigo-100 min-h-screen">
+    <div class="container mx-auto px-4 py-8 max-w-6xl">
+        <!-- Header -->
+        <header class="text-center mb-10">
+            <!-- Live Analytics Performance Card -->
+            <div class="flex gap-4 p-4 bg-gray-900 text-white rounded-lg shadow-xl mb-6 inline-flex">
+                <div>
+                    <p class="text-xs text-gray-400">⚡ Efficiency Gain</p>
+                    <p id="time-saved-counter" class="text-xl font-bold text-green-400">0s</p>
+                </div>
+                <div class="border-l border-gray-700 pl-4">
+                    <p class="text-xs text-gray-400">🎯 AI Confidence</p>
+                    <div class="w-24 bg-gray-700 h-2 rounded-full mt-2">
+                        <div id="confidence-bar" class="bg-blue-500 h-2 rounded-full" style="width: 0%"></div>
+                    </div>
+                </div>
+                <div class="border-l border-gray-700 pl-4">
+                    <p class="text-xs text-gray-400">🎤 Kiosk Mode</p>
+                    <button id="kiosk-toggle" class="bg-gray-700 hover:bg-gray-600 text-xs px-3 py-1 rounded mt-1 transition-colors">
+                        OFF
+                    </button>
+                </div>
+            </div>
+            
+            <h1 class="text-4xl font-bold text-gray-800 mb-2">
+                <i class="fas fa-microphone-alt text-red-500 mr-3"></i>
+                Executive AI-VAOM Controller
+            </h1>
+            <p class="text-gray-600">Business solution with analytics, optimistic UI, and enterprise efficiency</p>
+        </header>
+
+        <!-- Main Voice Interface -->
+        <section class="bg-white rounded-2xl shadow-xl p-8 mb-8">
+            <div class="text-center">
+                <button id="voiceButton" class="w-32 h-32 bg-red-500 hover:bg-red-600 text-white rounded-full transition-all duration-300 transform hover:scale-105 focus:outline-none focus:ring-4 focus:ring-red-300">
+                    <i class="fas fa-microphone text-4xl"></i>
+                </button>
+                
+                <div id="statusText" class="mt-6 text-lg font-semibold text-gray-700">
+                    Click the microphone to start
+                </div>
+                
+                <div id="transcript" class="mt-4 p-4 bg-gray-100 rounded-lg min-h-[60px] text-gray-800 font-mono text-sm hidden">
+                    <div class="text-xs text-gray-500 mb-2">Transcript:</div>
+                    <div id="transcriptText"></div>
+                </div>
+                
+                <div id="processingIndicator" class="mt-4 hidden">
+                    <i class="fas fa-spinner processing text-blue-500 text-2xl"></i>
+                    <span class="ml-2 text-gray-600">Processing your request...</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Analytics Dashboard -->
+        <section class="bg-white rounded-2xl shadow-xl p-8 mb-8">
+            <h2 class="text-2xl font-bold text-gray-800 mb-6">
+                <i class="fas fa-chart-line text-green-500 mr-2"></i>
+                Business Analytics
+            </h2>
+            
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <div class="bg-gradient-to-r from-green-50 to-green-100 rounded-lg p-6">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <p class="text-sm text-green-600 font-medium">Time Saved</p>
+                            <p id="timeSaved" class="text-3xl font-bold text-green-800">0s</p>
+                        </div>
+                        <i class="fas fa-clock text-green-500 text-3xl"></i>
+                    </div>
+                    <p class="text-xs text-green-600 mt-2">ROI through voice automation</p>
+                </div>
+                
+                <div class="bg-gradient-to-r from-blue-50 to-blue-100 rounded-lg p-6">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <p class="text-sm text-blue-600 font-medium">Intent Confidence</p>
+                            <p id="intentConfidence" class="text-3xl font-bold text-blue-800">0%</p>
+                        </div>
+                        <i class="fas fa-brain text-blue-500 text-3xl"></i>
+                    </div>
+                    <p class="text-xs text-blue-600 mt-2">AI understanding accuracy</p>
+                </div>
+                
+                <div class="bg-gradient-to-r from-purple-50 to-purple-100 rounded-lg p-6">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <p class="text-sm text-purple-600 font-medium">Environment</p>
+                            <p id="environmentMode" class="text-3xl font-bold text-purple-800">Quiet</p>
+                        </div>
+                        <i class="fas fa-volume-up text-purple-500 text-3xl"></i>
+                    </div>
+                    <p class="text-xs text-purple-600 mt-2">Adaptive response mode</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Orders Dashboard -->
+        <section class="bg-white rounded-2xl shadow-xl p-8">
+            <h2 class="text-2xl font-bold text-gray-800 mb-6">
+                <i class="fas fa-clipboard-list text-blue-500 mr-2"></i>
+                Orders Dashboard
+            </h2>
+            
+            <div class="mb-4 flex justify-between items-center">
+                <div class="text-sm text-gray-600">
+                    <span id="orderCount">0</span> active orders
+                </div>
+                <button id="clearAll" class="px-4 py-2 bg-gray-500 hover:bg-gray-600 text-white rounded-lg transition-colors text-sm">
+                    <i class="fas fa-trash mr-1"></i> Clear All
+                </button>
+            </div>
+            
+            <div class="overflow-x-auto">
+                <table class="w-full">
+                    <thead>
+                        <tr class="border-b-2 border-gray-200">
+                            <th class="text-left py-3 px-4 font-semibold text-gray-700">Order ID</th>
+                            <th class="text-left py-3 px-4 font-semibold text-gray-700">Item</th>
+                            <th class="text-left py-3 px-4 font-semibold text-gray-700">Quantity</th>
+                            <th class="text-left py-3 px-4 font-semibold text-gray-700">Status</th>
+                            <th class="text-left py-3 px-4 font-semibold text-gray-700">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="ordersTableBody">
+                        <tr>
+                            <td colspan="5" class="text-center py-8 text-gray-500">
+                                No orders yet. Start by using voice commands!
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Voice Commands Guide -->
+        <section class="mt-8 bg-white rounded-2xl shadow-xl p-8">
+            <h2 class="text-2xl font-bold text-gray-800 mb-6">
+                <i class="fas fa-info-circle text-green-500 mr-2"></i>
+                Voice Commands Guide
+            </h2>
+            <div class="grid md:grid-cols-2 gap-4">
+                <div class="p-4 bg-blue-50 rounded-lg">
+                    <h3 class="font-semibold text-blue-800 mb-2">Create Orders</h3>
+                    <ul class="text-sm text-gray-700 space-y-1">
+                        <li>• "Order a pizza"</li>
+                        <li>• "I want three coffees"</li>
+                        <li>• "Buy two burgers"</li>
+                    </ul>
+                </div>
+                <div class="p-4 bg-green-50 rounded-lg">
+                    <h3 class="font-semibold text-green-800 mb-2">Track Orders</h3>
+                    <ul class="text-sm text-gray-700 space-y-1">
+                        <li>• "Where is my pizza?"</li>
+                        <li>• "Check order 45"</li>
+                        <li>• "Status of my burger"</li>
+                    </ul>
+                </div>
+                <div class="p-4 bg-yellow-50 rounded-lg">
+                    <h3 class="font-semibold text-yellow-800 mb-2">Update Orders</h3>
+                    <ul class="text-sm text-gray-700 space-y-1">
+                        <li>• "Change order 45 to two pizzas"</li>
+                        <li>• "Update my coffee order"</li>
+                    </ul>
+                </div>
+                <div class="p-4 bg-red-50 rounded-lg">
+                    <h3 class="font-semibold text-red-800 mb-2">Cancel Orders</h3>
+                    <ul class="text-sm text-gray-700 space-y-1">
+                        <li>• "Cancel my pizza order 45"</li>
+                        <li>• "Delete order 42"</li>
+                    </ul>
+                </div>
+            </div>
+        </section>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
