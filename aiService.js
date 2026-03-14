@@ -7,111 +7,81 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
 /**
- * Process voice command using Gemini AI to extract item, quantity, and action
- * @param {string} text - Voice command text
- * @returns {Promise<Object>} - Extracted {item, quantity, action} or null if failed
+ * Process voice command using Gemini 1.5 Flash as the Complete Executive Brain.
+ * This removes all hardcoded regex/keywords and uses semantic understanding.
+ * @param {Object} params - { text, lastOrderId, environment, sessionId }
+ * @returns {Promise<Object>} - Executive Controller Response Schema
  */
-async function processVoiceCommand(text) {
+async function processExecutiveBrain({ text, lastOrderId, environment = 'Quiet', sessionId }) {
   try {
+    const isKioskMode = environment === 'High Noise';
+    
     const prompt = `
-You are a semantic intent engine. Extract the action (CREATE, DELETE, UPDATE, TRACK) and the item from natural language commands.
+You are the Executive AI-VAOM Controller, a professional business logic engine. 
+Your task is to parse user speech for restaurant/inventory commands and return a precise JSON response.
 
-INTENT MAPPING - Understand synonyms and context:
-- CREATE: "order", "add", "get", "buy", "want", "need", "craving", "grab", "fetch"
-- DELETE: "cancel", "remove", "delete", "drop", "scrap", "trash", "get rid of"
-- UPDATE: "change", "modify", "update", "make it", "switch to", "alter", "edit"
-- TRACK: "check", "track", "how is my", "where is", "status of", "what about"
+CONTEXT:
+- Current Environment: ${environment} (In "High Noise", keep voice_response under 5 words)
+- Last Order ID in Session: ${lastOrderId || 'None'}
 
-SEMANTIC ITEM UNDERSTANDING - Identify items even when described vaguely:
-- "caffeine fix" → coffee
-- "morning joe" → coffee
-- "liquid energy" → coffee
-- "round Italian dough with cheese" → pizza
-- "juicy beef patty in a bun" → burger
-- "cold bubbly refreshment" → soda
+INTENT CATEGORIES:
+- CREATE: Placing new orders
+- DELETE: Removing/Cancelling orders
+- UPDATE: Changing quantities or details
+- TRACK: Status checks
+- REPLACE: Swapping one item for another
+- CLARIFY: If the command is missing info (like quantity or item name)
+- IGNORE: If the text is just background noise or gibberish
 
-Return ONLY a valid JSON object in this exact format:
-For CREATE/DELETE/UPDATE/TRACK: {"action": "ACTION_NAME", "item": "item_name", "quantity": number}
-For REPLACE: {"action": "REPLACE", "old_item": "item_to_replace", "new_item": "replacement_item", "quantity": number}
+BUSINESS ANALYTICS DECK:
+- CREATE saves 15s per item.
+- UPDATE saves 20s.
+- DELETE saves 10s.
+- TRACK saves 5s.
 
-Rules:
-- Action must be one of: CREATE, DELETE, UPDATE, TRACK, REPLACE
-- For REPLACE: extract both old_item (being replaced) and new_item (replacement)
-- Item name should be lowercase and singular
-- If quantity is not specified, default to 1
-- If truly no item can be identified, return {"action": "IGNORE", "item": null, "quantity": null}
-- Return ONLY the JSON object, no other text or explanation
+RETURN THIS JSON FORMAT ONLY:
+{
+  "action": "CREATE | DELETE | UPDATE | TRACK | REPLACE | CLARIFY | IGNORE",
+  "optimistic_ui": {
+    "action_preview": "ADDING_ITEMS | HIDING_ROW | UPDATING_ITEM | REPLACING_ITEM | HIGHLIGHTING_ROW",
+    "target_id": "Number (extracted order ID or lastOrderId)",
+    "highlight_color": "Hex code (#22c55e for green/success, #ef4444 for red/delete, #f59e0b for amber/change)"
+  },
+  "analytics": {
+    "time_saved": Number (seconds saved based on intent),
+    "intent_confidence": Number (0.0 to 1.0)
+  },
+  "data": {
+    "items_list": [{"item": "singular_name", "qty": Number}],
+    "order_id": Number,
+    "old_item": "string (for REPLACE)",
+    "new_item": "string (for REPLACE)",
+    "require_confirmation": Boolean,
+    "context_reset": Boolean (True if user said "actually", "no wait", "scratch that")
+  },
+  "voice_response": "Short, professional confirmation matching the environment",
+  "dashboard_hint": "Brief status text for the UI"
+}
 
-Text to parse: "${text}"
+USER INPUT: "${text}"
 `;
 
     const result = await model.generateContent(prompt);
-    const response = result.response;
-    const textResponse = response.text();
-
-    // Extract JSON from response (handle potential markdown code blocks)
-    let jsonStr = textResponse.trim();
+    const textResponse = result.response.text().trim();
     
-    // Remove markdown code block if present
-    if (jsonStr.startsWith('```json')) {
-      jsonStr = jsonStr.replace(/```json\n?/, '').replace(/```$/, '');
-    } else if (jsonStr.startsWith('```')) {
-      jsonStr = jsonStr.replace(/```\n?/, '').replace(/```$/, '');
-    }
-    
-    jsonStr = jsonStr.trim();
-
-    // Parse the JSON response
+    // Clean JSON from Markdown blocks
+    let jsonStr = textResponse.replace(/^```json\n?/, '').replace(/```$/, '').trim();
     const parsed = JSON.parse(jsonStr);
-    
-    // Validate the response structure
-    if (!parsed.action) {
-      console.log('AI returned no action:', parsed);
-      return { action: 'ERROR', error: 'Invalid AI response', item: null, quantity: null };
-    }
 
-    // Handle ERROR action from AI
-    if (parsed.action === 'ERROR') {
-      return parsed;
-    }
-    
-    // 🧠 Gemini Reasoning Log
-    console.log(`\n🧠 Gemini Reasoning: [${parsed.action}] Intent identified. Item: "${parsed.item || parsed.old_item || 'none'}"`);
-
-    // Handle REPLACE action specially
-    if (parsed.action === 'REPLACE') {
-      if (!parsed.old_item || !parsed.new_item) {
-        console.log('AI returned REPLACE without old_item or new_item:', parsed);
-        return null;
-      }
-      return {
-        action: parsed.action,
-        old_item: parsed.old_item.toLowerCase(),
-        new_item: parsed.new_item.toLowerCase(),
-        item: parsed.new_item.toLowerCase(), // For compatibility
-        quantity: typeof parsed.quantity === 'number' ? parsed.quantity : 1
-      };
-    }
-
-    // If it's a CREATE/UPDATE action but no item, that's invalid
-    if ((parsed.action === 'CREATE' || parsed.action === 'UPDATE') && !parsed.item) {
-      console.log('AI returned action without item:', parsed);
-      return null;
-    }
-
-    return {
-      action: parsed.action,
-      item: parsed.item ? parsed.item.toLowerCase() : null,
-      quantity: typeof parsed.quantity === 'number' ? parsed.quantity : 1
-    };
+    console.log(`\n🧠 AI BRAIN DECISION: [${parsed.action}] Confidence: ${parsed.analytics.intent_confidence}`);
+    return parsed;
 
   } catch (error) {
-    console.error('Error processing voice command with Gemini:', error);
+    console.error('AI Brain Error:', error.message);
     return {
-      action: 'ERROR',
-      error: 'AI processing failed. Please try again.',
-      item: null,
-      quantity: null
+      action: 'IGNORE',
+      voice_response: 'Internal brain error. Please try again.',
+      analytics: { time_saved: 0, intent_confidence: 0 }
     };
   }
 }
@@ -509,7 +479,7 @@ async function trackOrder(item) {
 }
 
 module.exports = {
-  processVoiceCommand,
+  processExecutiveBrain,
   saveOrder,
   processAndSaveVoiceCommand
 };
